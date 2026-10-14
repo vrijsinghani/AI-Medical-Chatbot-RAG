@@ -1,16 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { apiFetch, getUsername, isLoggedIn } from '../session';
 
-const BACKEND_URL = '';
 export default function Chat() {
   const navigate = useNavigate();
-  const userEmail = localStorage.getItem('aiMedicalUserEmail') || '';
+  const username = getUsername();
   const storedName = localStorage.getItem('aiMedicalUserName') || 'Guest';
 
   useEffect(() => {
-    if (localStorage.getItem('aiMedicalLoggedIn') !== 'true') {
-      navigate('/auth');
-    }
+    if (!isLoggedIn()) navigate('/login');
   }, [navigate]);
 
   const defaultMsg = {
@@ -44,10 +42,10 @@ export default function Chat() {
   // FETCH DATA FROM BACKEND
   useEffect(() => {
     const fetchData = async () => {
-      if (!userEmail) return;
+      if (!username) return;
 
       try {
-        const profileRes = await fetch(`${BACKEND_URL}/api/profile/${userEmail}`);
+        const profileRes = await apiFetch('/api/profile');
         if (profileRes.ok) {
           const profileData = await profileRes.json();
           if (profileData.profile_pic) setUserProfilePic(profileData.profile_pic);
@@ -56,7 +54,7 @@ export default function Chat() {
           }
         }
 
-        const chatsRes = await fetch(`${BACKEND_URL}/api/chats/${userEmail}`);
+        const chatsRes = await apiFetch('/api/chats');
         if (chatsRes.ok) {
           const chatsData = await chatsRes.json();
           setChatHistory(chatsData);
@@ -66,7 +64,7 @@ export default function Chat() {
       }
     };
     fetchData();
-  }, [userEmail]);
+  }, [username]);
 
   useEffect(() => { 
     localStorage.setItem('aiMedicalTheme', isDarkMode ? 'dark' : 'light'); 
@@ -85,7 +83,7 @@ export default function Chat() {
   const confirmDelete = async () => {
     if (chatToDelete !== null) {
       try {
-        await fetch(`${BACKEND_URL}/api/chats/${chatToDelete}`, { method: 'DELETE' });
+        await apiFetch(`/api/chats/${chatToDelete}`, { method: 'DELETE' });
         setChatHistory(chatHistory.filter(c => c.id !== chatToDelete));
         if (currentChatId === chatToDelete) {
           setMessages([defaultMsg]);
@@ -119,12 +117,11 @@ export default function Chat() {
       
       const chatToUpdate = updatedHistory.find(c => c.id === id);
       if (chatToUpdate) {
-        await fetch(`${BACKEND_URL}/api/chats/save`, {
+        await apiFetch('/api/chats/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chat_id: id,
-            user_email: userEmail,
             title: editingTitle, 
             messages: chatToUpdate.savedChat
           })
@@ -153,13 +150,13 @@ export default function Chat() {
   // 🌟 UPDATE: Ab yeh object return karega taake humein 'source' ka pata chal sake
   const getAIResponse = async (userMessageText, currentMessagesList) => {
     try {
-      const patientAllergies = localStorage.getItem(`aiMedical_Allergies_${userEmail}`) || 'None';
+      const patientAllergies = localStorage.getItem(`aiMedical_Allergies_${username}`) || 'None';
       const conversationHistory = currentMessagesList.map(m => ({
         role: m.sender === 'user' ? 'user' : 'assistant',
         content: m.text
       }));
 
-      const response = await fetch(`${BACKEND_URL}/api/consultation`, {
+      const response = await apiFetch('/api/consultation', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -233,14 +230,13 @@ export default function Chat() {
       setChatHistory(prev => prev.map(c => c.id === chatIdToSave ? { ...c, savedChat: finalMessages } : c));
     }
 
-    if (userEmail) {
+    if (username) {
       try {
-        await fetch(`${BACKEND_URL}/api/chats/save`, {
+        await apiFetch('/api/chats/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             chat_id: chatIdToSave,
-            user_email: userEmail,
             title: titleToSave,
             messages: finalMessages
           })

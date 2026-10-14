@@ -1,59 +1,29 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
-// 🌟 PROFESSIONAL FIREBASE AUTH IMPORTS
-import { auth } from '../firebase';
-import { signOut, onAuthStateChanged } from 'firebase/auth';
+import { claimTabSession, getUsername, isLoggedIn as hasSession, logout } from '../session';
 
 export default function Home() {
   const navigate = useNavigate();
 
-  const [isLoggedIn, setIsLoggedIn] = useState(() => localStorage.getItem('aiMedicalLoggedIn') === 'true');
+  const [isLoggedIn, setIsLoggedIn] = useState(hasSession);
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('aiMedicalTheme') === 'dark');
   
   // Modals State
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const [showDisclaimer, setShowDisclaimer] = useState(false); // 🌟 NEW: Disclaimer State in Home
 
-  // 🌟 HELPER: Yeh function theme ke ilawa sab kuch dho dalega
-  const clearAllMedicalData = () => {
-    const theme = localStorage.getItem('aiMedicalTheme');
-    Object.keys(localStorage).forEach(key => {
-      if (key.startsWith('aiMedical')) {
-        localStorage.removeItem(key);
-      }
-    });
-    if (theme) localStorage.setItem('aiMedicalTheme', theme); // Theme bachao
-  };
-
   // 🌟 MAGIC FIX: Session Storage Watchdog
   useEffect(() => {
-    const isNewSession = !sessionStorage.getItem('aiMedicalSessionActive');
-    
-    if (isNewSession) {
-      signOut(auth);
-      clearAllMedicalData();
-      sessionStorage.setItem('aiMedicalSessionActive', 'true');
-      setIsLoggedIn(false);
+    if (claimTabSession() && hasSession()) {
+      logout().finally(() => setIsLoggedIn(false));
     }
-
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        setIsLoggedIn(true);
-        localStorage.setItem('aiMedicalLoggedIn', 'true');
-      } else {
-        setIsLoggedIn(false);
-        clearAllMedicalData();
-      }
-    });
-
-    return () => unsubscribe();
   }, []);
 
   // 🌟 NEW: SHOW DISCLAIMER ON HOME SCREEN AFTER LOGIN
   useEffect(() => {
     if (isLoggedIn) {
-      const userEmail = localStorage.getItem('aiMedicalUserEmail');
+      const userEmail = getUsername();
       // Agar email hai aur disclaimer pehle nahi dekha, toh Home par hi show karo!
       if (userEmail && localStorage.getItem(`aiMedical_DisclaimerSeen_${userEmail}`) !== 'true') {
         setShowDisclaimer(true);
@@ -62,7 +32,7 @@ export default function Home() {
   }, [isLoggedIn]);
 
   const acceptDisclaimer = () => {
-    const userEmail = localStorage.getItem('aiMedicalUserEmail');
+    const userEmail = getUsername();
     if (userEmail) {
       localStorage.setItem(`aiMedical_DisclaimerSeen_${userEmail}`, 'true');
     }
@@ -77,7 +47,7 @@ export default function Home() {
     if (isLoggedIn) {
       navigate('/chat');
     } else {
-      navigate('/auth');
+      navigate('/login');
     }
   };
 
@@ -87,8 +57,7 @@ export default function Home() {
 
   const confirmLogout = async () => {
     try {
-      await signOut(auth); // Firebase se session khatam
-      clearAllMedicalData(); // Local Storage khatam
+      await logout();
       setIsLoggedIn(false); 
       setShowLogoutModal(false);
     } catch (error) {
@@ -125,7 +94,7 @@ export default function Home() {
         
         <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
           {!isLoggedIn ? (
-            <Link to="/auth" style={{ textDecoration: 'none', color: theme.textMain, fontWeight: 'bold', fontSize: '16px' }}>
+            <Link to="/login" style={{ textDecoration: 'none', color: theme.textMain, fontWeight: 'bold', fontSize: '16px' }}>
               Login / Signup
             </Link>
           ) : (

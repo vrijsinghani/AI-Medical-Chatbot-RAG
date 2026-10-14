@@ -1,28 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 
-// 🌟 PROFESSIONAL FIREBASE LOGOUT IMPORT
-import { auth } from '../firebase';
-import { signOut } from 'firebase/auth';
-
-const BACKEND_URL = '';// Backend URL
+import { apiFetch, getUsername, isLoggedIn, logout } from '../session';
 
 export default function Profile() {
   const navigate = useNavigate();
 
-  // SECURITY GUARD
   useEffect(() => {
-    if (localStorage.getItem('aiMedicalLoggedIn') !== 'true') {
-      navigate('/auth');
-    }
+    if (!isLoggedIn()) navigate('/login');
   }, [navigate]);
 
-  const userEmail = localStorage.getItem('aiMedicalUserEmail') || 'patient@example.com';
+  const username = getUsername();
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('aiMedicalTheme') === 'dark');
 
   // DATA LOAD LOGIC (Local Fallback)
   const getSavedData = (key) => {
-      const data = localStorage.getItem(`aiMedical_${key}_${userEmail}`);
+      const data = localStorage.getItem(`aiMedical_${key}_${username}`);
       return data || '';
   };
 
@@ -42,9 +35,9 @@ export default function Profile() {
   // FETCH PROFILE FROM DATABASE ON LOAD
   useEffect(() => {
     const fetchProfile = async () => {
-      if (!userEmail) return;
+      if (!username) return;
       try {
-        const res = await fetch(`${BACKEND_URL}/api/profile/${userEmail}`);
+        const res = await apiFetch('/api/profile');
         if (res.ok) {
           const data = await res.json();
           if (data.age) setAge(data.age);
@@ -64,7 +57,7 @@ export default function Profile() {
       }
     };
     fetchProfile();
-  }, [userEmail]);
+  }, [username]);
 
   useEffect(() => { localStorage.setItem('aiMedicalTheme', isDarkMode ? 'dark' : 'light'); }, [isDarkMode]);
 
@@ -85,11 +78,10 @@ export default function Profile() {
     e.preventDefault();
     try {
       // 1. Save to Database First!
-      await fetch(`${BACKEND_URL}/api/profile/save`, {
+      await apiFetch('/api/profile/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: userEmail,
           name: name, // 🌟 Updated name field
           age: age,
           gender: gender,
@@ -101,11 +93,11 @@ export default function Profile() {
 
       // 2. Keep localStorage updated for fast UI loads
       localStorage.setItem('aiMedicalUserName', name); // Save new name locally
-      localStorage.setItem(`aiMedical_Age_${userEmail}`, age);
-      localStorage.setItem(`aiMedical_Gender_${userEmail}`, gender);
-      localStorage.setItem(`aiMedical_Blood_${userEmail}`, bloodGroup);
-      localStorage.setItem(`aiMedical_Allergies_${userEmail}`, allergies);
-      if (profilePic) localStorage.setItem(`aiMedical_ProfilePic_${userEmail}`, profilePic);
+      localStorage.setItem(`aiMedical_Age_${username}`, age);
+      localStorage.setItem(`aiMedical_Gender_${username}`, gender);
+      localStorage.setItem(`aiMedical_Blood_${username}`, bloodGroup);
+      localStorage.setItem(`aiMedical_Allergies_${username}`, allergies);
+      if (profilePic) localStorage.setItem(`aiMedical_ProfilePic_${username}`, profilePic);
       
       // 3. Show Success Modal
       setIsEditingName(false); // Close edit input if open
@@ -118,16 +110,7 @@ export default function Profile() {
 
   const confirmLogout = async () => {
     try {
-      await signOut(auth);
-      
-      const theme = localStorage.getItem('aiMedicalTheme');
-      Object.keys(localStorage).forEach(key => {
-        if (key.startsWith('aiMedical')) {
-          localStorage.removeItem(key);
-        }
-      });
-      if (theme) localStorage.setItem('aiMedicalTheme', theme);
-
+      await logout();
       navigate('/');
     } catch (error) {
       console.error("Error logging out: ", error);

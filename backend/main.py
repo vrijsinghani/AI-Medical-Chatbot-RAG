@@ -1,9 +1,8 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-import sqlite3
 import urllib.request
 import pickle
 import csv
@@ -14,6 +13,9 @@ import json
 
 warnings.filterwarnings("ignore")
 load_dotenv()
+
+from db import get_db
+from auth import current_user, init_auth_tables, router as auth_router
 
 # ── PATHS ──────────────────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -45,28 +47,37 @@ def check_internet() -> bool:
         except Exception:
             return False
 
-# ── GROQ SETUP & DYNAMIC CLIENT ─────────────────────────────────────────────────
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+# ── LLM SETUP & DYNAMIC CLIENT ──────────────────────────────────────────────────
+# Any OpenAI-compatible server (Groq, LiteLLM, ...). Defaults to Groq.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1").strip()
+LLM_MODEL    = os.getenv("LLM_MODEL", "").strip()
 groq_client  = None
+
+def get_llm_api_key() -> str:
+    return (
+        os.getenv("LLM_API_KEY", "").strip()
+        or os.getenv("GROQ_API_KEY", "").strip()
+        or os.getenv("GROQ_KEY", "").strip()
+    )
 
 def get_groq_client():
     global groq_client
     if groq_client is not None:
         return groq_client
     
-    key = os.getenv("GROQ_API_KEY", "").strip() or os.getenv("GROQ_KEY", "").strip()
+    key = get_llm_api_key()
     if not key:
         return None
     try:
-        from groq import Groq
-        groq_client = Groq(api_key=key, timeout=25.0)
-        print("✅ Groq API Ready! (Using Llama-3.3-70B)")
+        from openai import OpenAI
+        groq_client = OpenAI(api_key=key, base_url=LLM_BASE_URL, timeout=25.0)
+        print(f"✅ LLM API Ready! ({LLM_BASE_URL})")
         return groq_client
     except Exception as e:
-        print(f"⚠️  Groq setup error: {e}")
+        print(f"⚠️  LLM setup error: {e}")
         return None
 
-if GROQ_API_KEY:
+if get_llm_api_key():
     get_groq_client()
 
 # ── CSV LOADER (NO PANDAS) ─────────────────────────────────────────────────────
@@ -237,14 +248,7 @@ def load_bert():
     except Exception as e:
         print(f"⚠️ BERT/TFIDF startup safe bypass: {e}")
 
-# ── SQLite (VERCEL /TMP FIX) ───────────────────────────────────────────────────
-DB_NAME = "/tmp/medical_data.db"
-
-def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+# ── SQLite ─────────────────────────────────────────────────────────────────────
 def init_db():
     try:
         conn = get_db()
@@ -266,7 +270,8 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS user_chats (
             chat_id TEXT PRIMARY KEY, user_email TEXT, title TEXT,
             messages_json TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
-            
+
+        init_auth_tables(conn)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -291,10 +296,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Medical Chatbot", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+app.include_router(auth_router)
 
 # ── PROFILE & CHAT ENDPOINTS ───────────────────────────────────────────────────
+# The logged-in username is stored in the legacy `email` / `user_email` columns.
 class ProfileData(BaseModel):
-    email: str
     name: str = "Patient"
     profile_pic: str = None
     age: str = ""
@@ -304,51 +310,56 @@ class ProfileData(BaseModel):
 
 class ChatSaveData(BaseModel):
     chat_id: str
-    user_email: str
     title: str
     messages: list
 
 @app.post("/api/profile/save")
-def save_profile(data: ProfileData):
+def save_profile(data: ProfileData, username: str = Depends(current_user)):
     conn = get_db()
     conn.execute("""INSERT INTO user_profiles (email,name,profile_pic,age,gender,blood_group,allergies)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET
         name=excluded.name, profile_pic=excluded.profile_pic, age=excluded.age,
         gender=excluded.gender, blood_group=excluded.blood_group, allergies=excluded.allergies""",
-        (data.email, data.name, data.profile_pic, data.age, data.gender, data.blood_group, data.allergies))
+        (username, data.name, data.profile_pic, data.age, data.gender, data.blood_group, data.allergies))
     conn.commit(); conn.close()
     return {"status": "success"}
 
-@app.get("/api/profile/{email}")
-def get_profile(email: str):
+@app.get("/api/profile")
+def get_profile(username: str = Depends(current_user)):
     conn = get_db()
-    user = conn.execute("SELECT * FROM user_profiles WHERE email = ?", (email,)).fetchone()
+    user = conn.execute("SELECT * FROM user_profiles WHERE email = ?", (username,)).fetchone()
     conn.close()
     if user: return dict(user)
     return {"name": "Patient", "profile_pic": None, "age": "", "gender": "", "blood_group": "", "allergies": "None"}
 
 @app.post("/api/chats/save")
-def save_chat(data: ChatSaveData):
+def save_chat(data: ChatSaveData, username: str = Depends(current_user)):
     conn = get_db()
+    owner = conn.execute("SELECT user_email FROM user_chats WHERE chat_id=?", (data.chat_id,)).fetchone()
+    if owner and owner["user_email"] != username:
+        conn.close()
+        raise HTTPException(status_code=403, detail="This chat belongs to another user.")
     conn.execute("""INSERT INTO user_chats (chat_id,user_email,title,messages_json)
         VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET
         title=excluded.title, messages_json=excluded.messages_json, updated_at=CURRENT_TIMESTAMP""",
-        (data.chat_id, data.user_email, data.title, json.dumps(data.messages)))
+        (data.chat_id, username, data.title, json.dumps(data.messages)))
     conn.commit(); conn.close()
     return {"status": "success"}
 
-@app.get("/api/chats/{email}")
-def get_chats(email: str):
+@app.get("/api/chats")
+def get_chats(username: str = Depends(current_user)):
     conn = get_db()
-    chats = conn.execute("SELECT chat_id,title,messages_json FROM user_chats WHERE user_email=? ORDER BY updated_at DESC", (email,)).fetchall()
+    chats = conn.execute("SELECT chat_id,title,messages_json FROM user_chats WHERE user_email=? ORDER BY updated_at DESC", (username,)).fetchall()
     conn.close()
     return [{"id": c["chat_id"], "title": c["title"], "savedChat": json.loads(c["messages_json"])} for c in chats]
 
 @app.delete("/api/chats/{chat_id}")
-def delete_chat(chat_id: str):
+def delete_chat(chat_id: str, username: str = Depends(current_user)):
     conn = get_db()
-    conn.execute("DELETE FROM user_chats WHERE chat_id=?", (chat_id,))
+    deleted = conn.execute("DELETE FROM user_chats WHERE chat_id=? AND user_email=?", (chat_id, username)).rowcount
     conn.commit(); conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Chat not found.")
     return {"status": "success"}
 
 # ── PYDANTIC ───────────────────────────────────────────────────────────────────
@@ -479,6 +490,9 @@ def is_valid_chat_model(m_id: str) -> bool:
 def get_active_groq_model(client):
     global _cached_groq_model
     if _cached_groq_model:
+        return _cached_groq_model
+    if LLM_MODEL:
+        _cached_groq_model = LLM_MODEL
         return _cached_groq_model
     try:
         remote_models = [m.id for m in client.models.list().data]
@@ -760,7 +774,7 @@ def hybrid_rag_search(user_text: str):
 
 # ── MAIN ENDPOINT ──────────────────────────────────────────────────────────────
 @app.post("/api/consultation", response_model=ConsultationResponse)
-def get_diagnosis(request: ConsultationRequest):
+def get_diagnosis(request: ConsultationRequest, username: str = Depends(current_user)):
     if not request.symptoms.strip():
         raise HTTPException(status_code=422, detail="Symptoms cannot be empty.")
         
@@ -831,8 +845,8 @@ def get_diagnosis(request: ConsultationRequest):
 
 # ── DIAGNOSTIC / DEBUG ENDPOINT ────────────────────────────────────────────────
 @app.get("/api/debug")
-def debug_status():
-    api_key = os.getenv("GROQ_API_KEY", "").strip() or os.getenv("GROQ_KEY", "").strip()
+def debug_status(username: str = Depends(current_user)):
+    api_key = get_llm_api_key()
     has_key = bool(api_key)
     masked_key = (api_key[:6] + "..." + api_key[-4:]) if len(api_key) > 10 else ("Configured" if api_key else "NOT SET")
     client = get_groq_client()
